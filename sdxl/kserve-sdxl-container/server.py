@@ -5,25 +5,31 @@ import os
 from typing import Dict, Union
 
 import torch
-from diffusers import StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline
+from diffusers import StableDiffusionXLPipeline
 from kserve import InferRequest, InferResponse, Model, ModelServer, model_server
 from kserve.errors import InvalidInput
+from kserve import logging as kserve_logging
 
+logger = kserve_logging.logger
 
 class DiffusersModel(Model):
     def __init__(self, name: str):
         super().__init__(name)
+        # print('In __init__')
+
         self.model_id = args.model_id or "/mnt/models"
-        self.refiner_id = args.refiner_id or None
+        self.lora_dir = args.lora_dir or None
         self.pipeline = None
         self.refiner = None
         self.ready = False
+
         self.load()
 
     def load(self):
+
         # Load the model
         if args.single_file_model and args.single_file_model != "":
-            pipeline = StableDiffusionXLPipeline.from_single_file(
+            self.pipeline = StableDiffusionXLPipeline.from_single_file(
                 args.single_file_model,
                 torch_dtype=torch.float16,
                 variant="fp16",
@@ -31,7 +37,7 @@ class DiffusersModel(Model):
                 use_safetensors=True,
             )
         else:
-            pipeline = StableDiffusionXLPipeline.from_pretrained(
+            self.pipeline = StableDiffusionXLPipeline.from_pretrained(
                 self.model_id,
                 torch_dtype=torch.float16,
                 variant="fp16",
@@ -39,20 +45,25 @@ class DiffusersModel(Model):
                 use_safetensors=True,
             )
         if args.device:
-            print(f"Loading model on device: {args.device}")
+            print(f" -> Loading model on device: {args.device}")
             if args.device == "cuda":
-                pipeline.to(torch.device("cuda"))
+                self.pipeline.to(torch.device("cuda"))
             elif args.device == "cpu":
-                pipeline.to(torch.device("cpu"))
+                self.pipeline.to(torch.device("cpu"))
             elif args.device == "enable_model_cpu_offload":
-                pipeline.enable_model_cpu_offload()
+                self.pipeline.enable_model_cpu_offload()
             elif args.device == "enable_sequential_cpu_offload":
-                pipeline.enable_sequential_cpu_offload()
+                self.pipeline.enable_sequential_cpu_offload()
             else:
                 raise ValueError(f"Invalid device: {args.device}")
         else:
-            pipeline.to(torch.device("cuda"))
-        self.pipeline = pipeline
+            print(' -> Using "CUDA" device')
+            self.pipeline.to(torch.device("cuda"))
+
+        if self.lora_dir:
+            print(f" -> Trying to load LoRA weights for this model from {self.lora_dir}")
+            self.pipeline.load_lora_weights(self.lora_dir)
+            print(f" -> Loaded LoRA weights for this model from {self.lora_dir}")
 
         # Load the refiner model
         if args.use_refiner:
@@ -98,6 +109,7 @@ class DiffusersModel(Model):
         self, payload: Union[Dict, InferRequest], headers: Dict[str, str] = None
     ) -> Dict:
         if isinstance(payload, Dict) and "instances" in payload:
+            logger.info('setting request-type to "v1"...')
             headers["request-type"] = "v1"
         elif isinstance(payload, InferRequest):
             raise InvalidInput("v2 protocol not implemented")
@@ -117,6 +129,8 @@ class DiffusersModel(Model):
     def predict(
         self, payload: Union[Dict, InferRequest], headers: Dict[str, str] = None
     ) -> Union[Dict, InferResponse]:
+
+        logger.info(f'Payload for generating the image -> {payload}')
         payload = self.convert_lists_to_tuples(payload)
 
         # Create the image, without refiner if not needed
@@ -144,6 +158,7 @@ class DiffusersModel(Model):
 
 
 parser = argparse.ArgumentParser(parents=[model_server.parser])
+
 parser.add_argument(
     "--model_id",
     type=str,
@@ -164,6 +179,11 @@ parser.add_argument(
     help="Name of a single file refiner model to load",
 )
 parser.add_argument(
+    "--lora_dir",
+    type=str,
+    help="LoRA weights will be loaded from this directory (no default value)",
+)
+parser.add_argument(
     "--device",
     type=str,
     help="Device to use, including offloading. Valid values are: 'cuda' (default), 'enable_model_cpu_offload', 'enable_sequential_cpu_offload', 'cpu' (works but unusable...)",
@@ -171,6 +191,9 @@ parser.add_argument(
 args, _ = parser.parse_known_args()
 
 if __name__ == "__main__":
+    print(f' -> Creating an instance of DiffusersModel - modelName=[{args.model_name}]...')
     model = DiffusersModel(args.model_name)
-    model.load()
+    # model.load()      # model is loaded from init
+
+    print(' -> Calling start() on ModelServer...')
     ModelServer().start([model])

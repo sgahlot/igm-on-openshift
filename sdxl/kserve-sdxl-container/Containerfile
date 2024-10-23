@@ -76,7 +76,24 @@ ENV XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/local/cuda
 
 FROM cuda-runtime as kserve-container
 
-WORKDIR /opt/app-root/src
+ENV SRC_PATH=/opt/app-root/src
+WORKDIR $SRC_PATH
+
+
+###############################################################################################
+# SG: needed to use "root" to create and set permissions otherwise we get the following error #
+#     in OpenShift due to securityContextConstraints                                          #
+#                                                                                             #
+# PermissionError: [Errno 13] Permission denied: '/opt/app-root/src/.cache/huggingface'       #
+###############################################################################################
+
+USER root
+RUN mkdir -p .cache && \
+    chgrp -R 0 $SRC_PATH $SRC_PATH/.cache && \
+    chmod -R g=u $SRC_PATH $SRC_PATH/.cache
+###############################################################################################
+# SG: end of permission fix using user "root"                                                 #
+###############################################################################################
 
 USER 1001
 
